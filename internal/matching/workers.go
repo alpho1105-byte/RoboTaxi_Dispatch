@@ -59,8 +59,12 @@ func (w *Workers) requestLoop(ctx context.Context, i int) {
 				<-ctx.Done()
 				return
 			}
-			w.m.Start(ctx, msg.Body)
-			w.requests.Ack(msg.ID)
+			if msg.Body.Canceled {
+				w.m.Cancel(ctx, msg.Body.RideID)
+			} else {
+				w.m.Start(ctx, msg.Body)
+			}
+			w.requests.Ack(msg)
 		}
 	}
 }

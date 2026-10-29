@@ -51,9 +51,9 @@ func DefaultConfig() Config {
 }
 
 type Stats struct {
-	Started, Resumed, Matched, Failed  int64
-	Offers, Accepts, Rejects, Timeouts int64
-	Conflicts, LateAccepts             int64
+	Started, Resumed, Matched, Failed, Canceled int64
+	Offers, Accepts, Rejects, Timeouts          int64
+	Conflicts, LateAccepts                      int64
 }
 
 // Matcher 是 Matching Service 的核心：找出附近的候選車，一台一台送出派車詢問，
@@ -67,9 +67,9 @@ type Matcher struct {
 	latency *metrics.Latency
 	log     *slog.Logger
 
-	started, resumed, matched, failed  atomic.Int64
-	offers, accepts, rejects, timeouts atomic.Int64
-	conflicts, lateAccepts             atomic.Int64
+	started, resumed, matched, failed, canceled atomic.Int64
+	offers, accepts, rejects, timeouts          atomic.Int64
+	conflicts, lateAccepts                      atomic.Int64
 }
 
 func NewMatcher(cfg Config, store *Store, loc Locations, rides Rides, gw Dispatcher, latency *metrics.Latency, log *slog.Logger) *Matcher {
@@ -105,7 +105,7 @@ func (m *Matcher) advance(ctx context.Context, st *State, now time.Time) {
 			cands := m.loc.Nearby(st.Pickup, m.cfg.Candidates, m.cfg.SearchRadiusM, m.cfg.MinBattery, st.Tried)
 			if len(cands) == 0 || refills >= 3 {
 				// 附近暫時沒有空車：稍後再找。尖峰時，正在完成行程的車會陸續空出來。
-				st.OfferDeadline = now.Add(m.cfg.RetryEvery)
+				st.OfferDeadline = earlier(now.Add(m.cfg.RetryEvery), st.Deadline)
 				return
 			}
 			refills++
@@ -132,9 +132,37 @@ func (m *Matcher) advance(ctx context.Context, st *State, now time.Time) {
 		m.offers.Add(1)
 		st.Tried[av] = true
 		st.Offered[av] = true
-		st.OfferDeadline = now.Add(m.cfg.OfferTimeout)
+		// 回覆期限不能超過配對期限：否則最後一台候選要等滿整個 OfferTimeout 才會被判定逾時，
+		// 宣告失敗的時間就會超過期限。
+		st.OfferDeadline = earlier(now.Add(m.cfg.OfferTimeout), st.Deadline)
 		return
 	}
+}
+
+func earlier(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// Cancel 處理乘客取消：停止配對，撤回所有還在等回覆的派車詢問。
+// 取消事件可能比叫車請求先被處理（例如請求還在 queue 裡、或之後才被重新投遞），
+// 這時留下一個已取消的狀態，之後到的請求看到狀態已存在，就不會開始配對。
+func (m *Matcher) Cancel(ctx context.Context, rideID string) {
+	m.store.Update(rideID, func(st *State) *State {
+		if st == nil {
+			m.canceled.Add(1)
+			return &State{RideID: rideID, Status: Canceled, Offered: make(map[string]bool), Tried: make(map[string]bool)}
+		}
+		if st.Status != Searching {
+			return nil
+		}
+		m.canceled.Add(1)
+		st.Status = Canceled
+		m.withdraw(st)
+		return st
+	})
 }
 
 // OnDecision 處理車輛的回覆。可能由任何一個 worker 收到，甚至不是送出詢問的那一個。
@@ -242,7 +270,7 @@ func (m *Matcher) withdraw(st *State) {
 
 func (m *Matcher) Stats() Stats {
 	return Stats{
-		Started: m.started.Load(), Resumed: m.resumed.Load(), Matched: m.matched.Load(), Failed: m.failed.Load(),
+		Started: m.started.Load(), Resumed: m.resumed.Load(), Matched: m.matched.Load(), Failed: m.failed.Load(), Canceled: m.canceled.Load(),
 		Offers: m.offers.Load(), Accepts: m.accepts.Load(), Rejects: m.rejects.Load(), Timeouts: m.timeouts.Load(),
 		Conflicts: m.conflicts.Load(), LateAccepts: m.lateAccepts.Load(),
 	}

@@ -63,4 +63,6 @@ type RideRequest struct {
 	Pickup      Point
 	Destination Point
 	RequestedAt time.Time
+	// Canceled 為 true 時是乘客取消：Matching 停止配對並撤回已送出的派車詢問。
+	Canceled bool
 }

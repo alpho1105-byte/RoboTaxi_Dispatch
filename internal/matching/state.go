@@ -15,6 +15,7 @@ const (
 	Searching Status = "SEARCHING"
 	Done      Status = "DONE"
 	Failed    Status = "FAILED"
+	Canceled  Status = "CANCELED"
 )
 
 // State 是一趟行程的配對狀態，對應 Redis 上的 match:ride:<ride_id>。

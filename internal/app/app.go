@@ -46,6 +46,7 @@ type App struct {
 	Matcher      *matching.Matcher
 	Workers      *matching.Workers
 	MatchLatency *metrics.Latency
+	log          *slog.Logger
 }
 
 func New(opts Options) (*App, error) {
@@ -59,6 +60,7 @@ func New(opts Options) (*App, error) {
 		Requests:     queue.NewLeased[domain.RideRequest](opts.Visibility),
 		States:       matching.NewStore(),
 		MatchLatency: &metrics.Latency{},
+		log:          opts.Logger,
 	}
 	a.RideService = ride.NewService(store, fare.DefaultEstimator(), a.Requests)
 	a.Gateway = gateway.New(a.Locations, a.RideService, 4096)
@@ -69,6 +71,11 @@ func New(opts Options) (*App, error) {
 }
 
 func (a *App) Run(ctx context.Context) {
+	if n, err := a.RideService.Recover(ctx); err != nil {
+		a.log.Error("recover waiting rides", "err", err)
+	} else if n > 0 {
+		a.log.Info("requeued rides still waiting for a match", "rides", n)
+	}
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {

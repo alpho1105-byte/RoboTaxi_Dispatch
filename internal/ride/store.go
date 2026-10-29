@@ -185,6 +185,11 @@ func (s *Store) All(ctx context.Context) ([]domain.Ride, error) {
 	return s.list(ctx, ``)
 }
 
+// Requested 回傳還在等待配對的行程。
+func (s *Store) Requested(ctx context.Context) ([]domain.Ride, error) {
+	return s.list(ctx, `WHERE status = ?`, string(domain.RideRequested))
+}
+
 func (s *Store) query(ctx context.Context, where string, args ...any) (domain.Ride, bool, error) {
 	rides, err := s.list(ctx, where+` LIMIT 1`, args...)
 	if err != nil || len(rides) == 0 {

@@ -16,7 +16,7 @@ func TestUnackedMessagesAreRedelivered(t *testing.T) {
 	if err != nil || len(batch) != 2 {
 		t.Fatalf("batch = %+v, %v", batch, err)
 	}
-	q.Ack(batch[0].ID)
+	q.Ack(batch[0])
 
 	// 第二則沒有 Ack，租約到期後重新出現，投遞次數加一。
 	q.requeueExpired(time.Now().Add(2 * time.Minute))
@@ -24,7 +24,11 @@ func TestUnackedMessagesAreRedelivered(t *testing.T) {
 	if len(again) != 1 || again[0].Body != "b" || again[0].Deliveries != 2 {
 		t.Fatalf("redelivered = %+v", again)
 	}
-	if q.Ack(batch[1].ID) != true {
+	// 第一個 consumer 晚一步才 Ack：訊息已經交給下一個 consumer，舊的 Ack 不能結束新的租約。
+	if q.Ack(batch[1]) {
+		t.Fatal("the first consumer acked a message whose lease had already moved to another consumer")
+	}
+	if !q.Ack(again[0]) {
 		t.Fatal("ack of the redelivered message should succeed")
 	}
 	if s := q.Stats(); s.Published != 2 || s.Acked != 2 || s.Redelivered != 1 || s.InFlight != 0 {

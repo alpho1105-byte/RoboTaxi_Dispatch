@@ -83,13 +83,16 @@ func (q *Leased[T]) Receive(ctx context.Context, max int) ([]Message[T], error) 
 }
 
 // Ack 確認訊息已處理完畢；租約已過期、訊息已被重新投遞時回傳 false。
-func (q *Leased[T]) Ack(id uint64) bool {
+// 以投遞次數當作租約的 token：租約過期的 consumer 晚一步才 Ack 時，這則訊息可能已經交給別的 consumer，
+// 只比對 id 的話，舊 consumer 會把新 consumer 還在處理的租約一起結束掉。
+func (q *Leased[T]) Ack(m Message[T]) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if _, ok := q.inflight[id]; !ok {
+	f, ok := q.inflight[m.ID]
+	if !ok || f.msg.Deliveries != m.Deliveries {
 		return false
 	}
-	delete(q.inflight, id)
+	delete(q.inflight, m.ID)
 	q.stats.Acked++
 	return true
 }

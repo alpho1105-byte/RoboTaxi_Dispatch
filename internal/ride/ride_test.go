@@ -58,8 +58,16 @@ func TestRequestRideIsIdempotentPerFare(t *testing.T) {
 
 	first, created1, _ := s.RequestRide(ctx, "alice", f.ID)
 	second, created2, _ := s.RequestRide(ctx, "alice", f.ID)
-	if !created1 || created2 || first.ID != second.ID || len(pub.published) != 1 {
-		t.Fatalf("created=%v,%v ids=%s,%s published=%d", created1, created2, first.ID, second.ID, len(pub.published))
+	if !created1 || created2 || first.ID != second.ID {
+		t.Fatalf("created=%v,%v ids=%s,%s", created1, created2, first.ID, second.ID)
+	}
+	// 行程還在等待配對，重送會再放一次請求進 queue（第一次可能遺失了）；Matching 會認出重複的請求。
+	if len(pub.published) != 2 || pub.published[1].RideID != first.ID {
+		t.Fatalf("published = %+v", pub.published)
+	}
+	s.Assign(ctx, first.ID, "av-1")
+	if _, _, err := s.RequestRide(ctx, "alice", f.ID); err != nil || len(pub.published) != 2 {
+		t.Fatalf("a retry after the ride was assigned published again: %v, %d", err, len(pub.published))
 	}
 	if _, _, err := s.RequestRide(ctx, "mallory", f.ID); !errors.Is(err, ErrFareNotFound) {
 		t.Fatalf("another rider using the fare: %v", err)
@@ -116,15 +124,33 @@ func TestTripEventsOnlyFromTheAssignedVehicle(t *testing.T) {
 
 func TestCancelOnlyWhileWaiting(t *testing.T) {
 	ctx := context.Background()
-	s, _, _ := newService(t)
+	s, _, pub := newService(t)
 	r := request(t, s, "alice")
 	if err := s.Cancel(ctx, "alice", r.ID); err != nil {
 		t.Fatal(err)
+	}
+	if last := pub.published[len(pub.published)-1]; last.RideID != r.ID || !last.Canceled {
+		t.Fatalf("Matching was not told about the cancel: %+v", pub.published)
 	}
 	if err := s.Cancel(ctx, "alice", r.ID); !errors.Is(err, ErrNotCancelable) {
 		t.Fatalf("second cancel: %v", err)
 	}
 	if err := s.Assign(ctx, r.ID, "av-1"); !errors.Is(err, ErrNotAssignable) {
 		t.Fatalf("assigning a canceled ride: %v", err)
+	}
+}
+
+// 程序重啟後 queue 是空的：還在等待配對的行程要重新放回去，其他狀態的行程不能動。
+func TestRecoverRequeuesRidesStillWaiting(t *testing.T) {
+	ctx := context.Background()
+	s, _, pub := newService(t)
+	waiting := request(t, s, "alice")
+	assigned := request(t, s, "bob")
+	s.Assign(ctx, assigned.ID, "av-1")
+	pub.published = nil
+
+	n, err := s.Recover(ctx)
+	if err != nil || n != 1 || len(pub.published) != 1 || pub.published[0].RideID != waiting.ID {
+		t.Fatalf("recover = %d, %v, published %+v", n, err, pub.published)
 	}
 }

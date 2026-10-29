@@ -68,11 +68,32 @@ func (s *Service) RequestRide(ctx context.Context, riderID, fareID string) (doma
 		ID: newID("ride_"), FareID: f.ID, RiderID: riderID, Pickup: f.Pickup, Destination: f.Destination,
 		AmountCents: f.AmountCents, Status: domain.RideRequested, RequestedAt: now,
 	})
-	if err != nil || !created {
-		return r, false, err
+	if err != nil {
+		return domain.Ride{}, false, err
 	}
+	// 重送時行程若還在等待配對，就再送一次請求：上一次可能在寫入資料庫之後、放進 queue 之前就遺失了，
+	// 只靠第一次送出的話，這趟行程會永遠停在 REQUESTED。Matching 會認出重複的請求，不會重複派車。
+	if created || r.Status == domain.RideRequested {
+		s.publish(r)
+	}
+	return r, created, nil
+}
+
+func (s *Service) publish(r domain.Ride) {
 	s.queue.Publish(domain.RideRequest{RideID: r.ID, Pickup: r.Pickup, Destination: r.Destination, RequestedAt: r.RequestedAt})
-	return r, true, nil
+}
+
+// Recover 在啟動時把所有還在等待配對的行程重新放進 queue。queue 與配對狀態都在記憶體裡（正式環境是 SQS 與 Redis），
+// 程序重啟後它們是空的，資料庫裡 REQUESTED 的行程沒有人會去處理。超過配對期限的行程會被 Matching 直接判定失敗。
+func (s *Service) Recover(ctx context.Context) (int, error) {
+	rides, err := s.store.Requested(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range rides {
+		s.publish(r)
+	}
+	return len(rides), nil
 }
 
 func (s *Service) Ride(ctx context.Context, riderID, rideID string) (domain.Ride, error) {
@@ -97,6 +118,8 @@ func (s *Service) Cancel(ctx context.Context, riderID, rideID string) error {
 	if !ok {
 		return ErrNotCancelable
 	}
+	// 通知 Matching 停止配對，不必等到某台車接受時才從 Assign 的失敗發現這趟行程已經取消。
+	s.queue.Publish(domain.RideRequest{RideID: rideID, Canceled: true})
 	return nil
 }
 

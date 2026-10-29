@@ -214,3 +214,57 @@ func TestDeadlineFailsTheRide(t *testing.T) {
 		t.Fatalf("ride = %+v", r)
 	}
 }
+
+// 乘客取消時正在詢問的車要被撤回，之後的逾時也不能再詢問下一台。
+func TestCancelStopsMatchingAndWithdrawsTheOffer(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, testConfig(), "v1", "v2")
+	req := f.newRide()
+	f.m.Start(ctx, req)
+	f.m.Cancel(ctx, req.RideID)
+
+	if got := f.gw.kinds("v1"); len(got) != 2 || got[1] != domain.CommandCancel {
+		t.Fatalf("v1 commands = %v, the pending offer should be withdrawn", got)
+	}
+	time.Sleep(60 * time.Millisecond)
+	f.m.OnTimeouts(ctx)
+	if got := f.gw.kinds("v2"); len(got) != 0 {
+		t.Fatalf("v2 commands = %v, a canceled ride kept dispatching", got)
+	}
+	if st, _ := f.store.Get(req.RideID); st.Status != Canceled || f.m.Stats().Canceled != 1 {
+		t.Fatalf("state = %+v", st)
+	}
+}
+
+// 取消事件比叫車請求先被處理（請求還在 queue 裡，或之後才被重新投遞）：請求到了也不能開始配對。
+func TestCancelBeforeTheRequestIsProcessed(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, testConfig(), "v1")
+	req := f.newRide()
+	f.m.Cancel(ctx, req.RideID)
+	f.m.Start(ctx, req)
+	if got := f.gw.kinds("v1"); len(got) != 0 {
+		t.Fatalf("v1 commands = %v, a canceled ride was dispatched", got)
+	}
+}
+
+// 最後一台候選的回覆期限不能超過配對期限，否則宣告失敗的時間會被拖到期限之後。
+func TestOfferDeadlineNeverPassesTheMatchingDeadline(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig()
+	cfg.OfferTimeout = 5 * time.Second
+	cfg.Deadline = 150 * time.Millisecond
+	f := newFixture(t, cfg, "v1")
+	req := f.newRide()
+	f.m.Start(ctx, req)
+
+	st, _ := f.store.Get(req.RideID)
+	if st.OfferDeadline.After(st.Deadline) {
+		t.Fatalf("offer deadline %s is after the matching deadline %s", st.OfferDeadline, st.Deadline)
+	}
+	time.Sleep(200 * time.Millisecond)
+	f.m.OnTimeouts(ctx)
+	if r := f.ride(req.RideID); r.Status != domain.RideNoAVAvailable {
+		t.Fatalf("ride = %+v, it should fail at the matching deadline, not after v1's 5s offer timeout", r)
+	}
+}
